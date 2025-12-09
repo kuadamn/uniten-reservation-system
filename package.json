@@ -8,10 +8,18 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^5.1.0",
+    "express": "^5.2.1",
     "firebase-admin": "^13.6.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kuadamn/uniten-reservation-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kuadamn/uniten-reservation-system/issues"
+  },
+  "homepage": "https://github.com/kuadamn/uniten-reservation-system#readme",
+  "description": ""
 }
