@@ -15,19 +15,22 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const API_URL = "http://localhost:8080"; 
 let currentUserToken = null; 
+let currentFullSlots = []; 
 
 // UI Elements
 const authContainer = document.getElementById('authContainer');
 const appContent = document.getElementById('appContent');
 const loginForm = document.getElementById('loginForm');
 
-// AUTHENTICATION
+// 1. AUTHENTICATION
 onAuthStateChanged(auth, async (user) => {
     if (user) {
         currentUserToken = await user.getIdToken();
         authContainer.classList.add('hidden');
         appContent.classList.remove('hidden');
+
         await loadUserProfile(); 
+        populateTimeSelects(); 
         loadFacilities();
         fetchReservations();
     } else {
@@ -54,23 +57,22 @@ loginForm.addEventListener('submit', async (e) => {
 
 document.getElementById('logoutBtn').addEventListener('click', () => signOut(auth));
 
-// FACILITY LOADING
+// 2. FACILITY & AVAILABILITY LOGIC
 let allFacilitiesData = [];
+
 async function loadFacilities() {
     const typeSelect = document.getElementById('facilityType');
     const unitSelect = document.getElementById('facility'); 
     const unitContainer = document.getElementById('unitContainer');
+    const endTimeInput = document.getElementById('endTime');
 
     unitContainer.classList.add('hidden');
     unitSelect.innerHTML = '';
     typeSelect.value = ''; 
 
     try {
-        const response = await fetch(`${API_URL}/facilities`, {
-            headers: { 'Authorization': `Bearer ${currentUserToken}` }
-        });
+        const response = await fetch(`${API_URL}/facilities`, { headers: { 'Authorization': `Bearer ${currentUserToken}` } });
         allFacilitiesData = await response.json();
-        
         const types = [...new Set(allFacilitiesData.map(f => f.type))];
         typeSelect.innerHTML = '<option value="">-- Choose Facility Type --</option>';
         types.forEach(t => typeSelect.innerHTML += `<option value="${t}">${t}</option>`);
@@ -81,31 +83,141 @@ async function loadFacilities() {
         newTypeSelect.addEventListener('change', () => {
             const selectedType = newTypeSelect.value;
             unitSelect.innerHTML = ''; 
+            
+            // [FIX] Reset Time Inputs
+            document.getElementById('startTime').value = "";
+            endTimeInput.value = "";
+            
+            // [FIX] End Time is Visible but DISABLED initially
+            endTimeInput.disabled = true; 
+            endTimeInput.required = true;
+            endTimeInput.classList.add('bg-gray-200', 'cursor-not-allowed', 'text-gray-500');
+            endTimeInput.classList.remove('bg-gray-50', 'text-gray-900');
+
             if (!selectedType) {
                 unitContainer.classList.add('hidden');
                 return;
             }
+
             let matching = allFacilitiesData.filter(f => f.type === selectedType);
             matching.sort((a, b) => a.label.localeCompare(b.label));
 
             if (matching.length === 1) {
                 unitSelect.innerHTML = `<option value="${matching[0].name}" selected>${matching[0].name}</option>`;
                 unitContainer.classList.add('hidden');
+                checkAvailability(); 
             } else {
                 unitContainer.classList.remove('hidden');
                 unitSelect.innerHTML = '<option value="">-- Select Specific Unit --</option>';
                 matching.forEach(fac => {
-                    const isFull = fac.currentOccupancy >= fac.maxCapacity;
-                    const disabled = isFull || fac.status !== 'Open' ? 'disabled' : '';
-                    const label = `${fac.label} (${fac.currentOccupancy}/${fac.maxCapacity}) ${disabled ? '- FULL/CLOSED' : ''}`;
-                    unitSelect.innerHTML += `<option value="${fac.name}" ${disabled}>${label}</option>`;
+                    const isClosed = fac.status !== 'Open';
+                    unitSelect.innerHTML += `<option value="${fac.name}" ${isClosed ? 'disabled' : ''}>
+                        ${fac.label} ${isClosed ? '(MAINTENANCE)' : ''}
+                    </option>`;
                 });
             }
         });
     } catch (err) { console.error(err); }
 }
 
-// BOOKING SUBMISSION
+// REAL-TIME CHECKER
+async function checkAvailability() {
+    const facility = document.getElementById('facility').value;
+    const date = document.getElementById('date').value;
+    const startSelect = document.getElementById('startTime');
+
+    // Reset Start Time visuals
+    Array.from(startSelect.options).forEach(opt => {
+        opt.disabled = false;
+        if(opt.textContent.includes(' - FULL')) {
+            opt.textContent = opt.textContent.replace(' - FULL', '');
+        }
+        opt.classList.remove('bg-gray-200', 'text-gray-400');
+    });
+
+    if (!facility || !date) return;
+
+    try {
+        const response = await fetch(`${API_URL}/availability?facility=${encodeURIComponent(facility)}&date=${date}`, {
+            headers: { 'Authorization': `Bearer ${currentUserToken}` }
+        });
+        currentFullSlots = await response.json(); 
+
+        // Gray out full slots
+        Array.from(startSelect.options).forEach(opt => {
+            if (currentFullSlots.includes(opt.value)) {
+                opt.disabled = true;
+                opt.textContent += ' - FULL';
+                opt.classList.add('bg-gray-200', 'text-gray-400');
+            }
+        });
+
+        updateEndTimeAvailability();
+
+    } catch (error) { console.error(error); }
+}
+
+// [UPDATED] Helper to Unlock End Time
+function updateEndTimeAvailability() {
+    const startVal = document.getElementById('startTime').value;
+    const endSelect = document.getElementById('endTime');
+    
+    // 1. If No Start Time -> Keep End Time Disabled
+    if (!startVal) {
+        endSelect.disabled = true;
+        endSelect.value = "";
+        endSelect.classList.add('bg-gray-200', 'cursor-not-allowed', 'text-gray-500');
+        return;
+    }
+
+    // 2. If Start Time Picked -> Unlock End Time
+    endSelect.disabled = false;
+    endSelect.classList.remove('bg-gray-200', 'cursor-not-allowed', 'text-gray-500');
+    endSelect.classList.add('bg-gray-50', 'text-gray-900');
+
+    // Reset visuals
+    Array.from(endSelect.options).forEach(opt => {
+        opt.disabled = false;
+        opt.textContent = opt.textContent.replace(' - UNAVAILABLE', '');
+        opt.classList.remove('bg-gray-200', 'text-gray-400');
+    });
+
+    if (endSelect.value && endSelect.value <= startVal) endSelect.value = "";
+
+    // 3. Find limits based on occupied slots
+    let nextBusySlot = null;
+    currentFullSlots.sort();
+
+    for (let slot of currentFullSlots) {
+        if (slot >= startVal) {
+            nextBusySlot = slot;
+            break;
+        }
+    }
+
+    // 4. Disable invalid options
+    Array.from(endSelect.options).forEach(opt => {
+        if (!opt.value) return;
+
+        if (opt.value <= startVal) {
+            opt.disabled = true;
+            opt.classList.add('bg-gray-200', 'text-gray-400');
+        } 
+        else if (nextBusySlot && opt.value > nextBusySlot) {
+            opt.disabled = true;
+            opt.textContent += ' - UNAVAILABLE';
+            opt.classList.add('bg-gray-200', 'text-gray-400');
+        }
+    });
+}
+
+// Triggers
+document.getElementById('date').addEventListener('change', checkAvailability);
+document.getElementById('facility').addEventListener('change', checkAvailability);
+document.getElementById('startTime').addEventListener('change', updateEndTimeAvailability);
+
+
+// 3. BOOKING SUBMISSION
 document.getElementById('bookingForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const statusDiv = document.getElementById('statusMessage');
@@ -114,13 +226,14 @@ document.getElementById('bookingForm').addEventListener('submit', async (e) => {
     if (submitBtn.disabled) return;
     submitBtn.disabled = true;
     submitBtn.textContent = "Processing...";
-    statusDiv.textContent = "Sending Request...";
+    statusDiv.textContent = "Checking Availability...";
     statusDiv.className = "mt-4 text-center text-blue-600 block bg-blue-50 p-2 rounded";
 
     const data = {
         facility: document.getElementById('facility').value,
         date: document.getElementById('date').value,
-        time: document.getElementById('time').value
+        startTime: document.getElementById('startTime').value, 
+        endTime: document.getElementById('endTime').value        
     };
 
     try {
@@ -134,12 +247,14 @@ document.getElementById('bookingForm').addEventListener('submit', async (e) => {
         if (response.ok) {
             statusDiv.textContent = `✅ Request Sent! Status: PENDING`;
             statusDiv.className = "mt-4 text-center text-green-600 block font-bold bg-green-50 p-2 rounded";
-            
             document.getElementById('bookingForm').reset();
-            
-            // [FIX 1] Restore Name and ID immediately after reset
             await loadUserProfile(); 
+            populateTimeSelects();
             
+            // Re-lock End Time after reset
+            document.getElementById('endTime').disabled = true;
+            document.getElementById('endTime').classList.add('bg-gray-200', 'cursor-not-allowed');
+
             fetchReservations(); 
             loadFacilities();
             setTimeout(() => statusDiv.classList.add('hidden'), 3000);
@@ -157,7 +272,7 @@ document.getElementById('bookingForm').addEventListener('submit', async (e) => {
     }
 });
 
-// LOAD USER PROFILE
+// 4. USER PROFILE & ADMIN
 async function loadUserProfile() {
     try {
         const response = await fetch(`${API_URL}/my-profile`, { headers: { 'Authorization': `Bearer ${currentUserToken}` } });
@@ -182,7 +297,6 @@ async function loadUserProfile() {
     } catch (error) { console.error(error); }
 }
 
-// ADMIN: LOAD TABLE
 async function loadAdminControls() {
     const listTbody = document.getElementById('adminFacilityList');
     if(!listTbody) return;
@@ -221,11 +335,10 @@ async function loadAdminControls() {
         const percentage = totalCap > 0 ? Math.round((usedCap / totalCap) * 100) : 0;
         document.getElementById('statOccupancyTxt').innerText = percentage + "%";
         document.getElementById('statOccupancyBar').style.width = percentage + "%";
-
     } catch (e) { console.error(e); }
 }
 
-// RESERVATIONS LIST
+// 5. RESERVATIONS
 async function fetchReservations() {
     try {
         const response = await fetch(`${API_URL}/reservations`, { headers: { 'Authorization': `Bearer ${currentUserToken}` } });
@@ -252,7 +365,7 @@ async function fetchReservations() {
                             <div class="font-medium">${b.studentName}</div>
                             <div class="text-xs text-gray-500">${b.studentId}</div>
                         </td>
-                        <td class="px-6 py-4 text-sm text-gray-600">${b.date} @ ${b.time}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">${b.date} <br/> ${formatTime(b.startTime, b.endTime)}</td>
                         <td class="px-6 py-4 text-right space-x-2">
                             <button onclick="window.approveBooking('${b.id}')" class="text-green-600 font-bold text-xs bg-green-100 px-3 py-1.5 rounded">✔ Approve</button>
                             <button onclick="window.cancelBooking('${b.id}')" class="text-red-600 font-bold text-xs bg-red-100 px-3 py-1.5 rounded">✖ Reject</button>
@@ -281,7 +394,7 @@ function renderMainList(data, container) {
         <tr class="hover:bg-gray-50 transition border-b border-gray-50 last:border-0">
             <td class="px-6 py-4 font-medium text-gray-800">${b.facility}</td>
             <td class="px-6 py-4 text-sm text-gray-600">${b.studentName}</td>
-            <td class="px-6 py-4 text-sm text-gray-600">${b.date} @ ${b.time}</td>
+            <td class="px-6 py-4 text-sm text-gray-600">${b.date} @ ${formatTime(b.startTime, b.endTime)}</td>
             <td class="px-6 py-4 text-center">${statusBadge}</td>
             <td class="px-6 py-4 text-right">
                 <button onclick="window.cancelBooking('${b.id}')" class="text-gray-400 hover:text-red-600 font-bold text-xl">×</button>
@@ -290,32 +403,50 @@ function renderMainList(data, container) {
     `}).join('');
 }
 
-// GLOBAL ACTIONS
+// 6. HELPERS
+function populateTimeSelects() {
+    const startSelect = document.getElementById('startTime');
+    const endSelect = document.getElementById('endTime');
+    
+    startSelect.innerHTML = '<option value="">-- Select --</option>';
+    endSelect.innerHTML = '<option value="">-- Select --</option>';
+
+    const startHour = 8;
+    const endHour = 22;
+
+    for (let i = startHour; i <= endHour; i++) {
+        const timeVal = i.toString().padStart(2, '0') + ":00";
+        const label = convertTo12Hour(timeVal);
+        if (i < endHour) startSelect.innerHTML += `<option value="${timeVal}">${label}</option>`;
+        if (i > startHour) endSelect.innerHTML += `<option value="${timeVal}">${label}</option>`;
+    }
+}
+
+function formatTime(start, end) {
+    return `${convertTo12Hour(start)} - ${convertTo12Hour(end)}`;
+}
+function convertTo12Hour(time24) {
+    if (!time24) return "";
+    const [hours, minutes] = time24.split(':');
+    let h = parseInt(hours, 10);
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; h = h ? h : 12; 
+    return `${h}:${minutes} ${ampm}`;
+}
+
 window.approveBooking = async (id) => {
     try {
         const response = await fetch(`${API_URL}/admin/approve/${id}`, { method: 'POST', headers: { 'Authorization': `Bearer ${currentUserToken}` } });
-        if (response.ok) { 
-            fetchReservations(); 
-            loadAdminControls(); // [FIX 2] Update capacity stats immediately
-        }
+        if (response.ok) { fetchReservations(); loadAdminControls(); }
     } catch (e) { console.error(e); }
 };
-
 window.cancelBooking = async (reservationId) => {
     if (!confirm("Are you sure?")) return;
     try {
-        const response = await fetch(`${API_URL}/cancel/${reservationId}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${currentUserToken}` }
-        });
-        if (response.ok) { 
-            loadFacilities(); 
-            fetchReservations();
-            loadAdminControls(); // [FIX 2] Update capacity stats immediately
-        }
+        const response = await fetch(`${API_URL}/cancel/${reservationId}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${currentUserToken}` } });
+        if (response.ok) { loadFacilities(); fetchReservations(); loadAdminControls(); checkAvailability(); }
     } catch (error) { console.error(error); }
 };
-
 window.toggleFacilityStatus = async (name, newStatus) => {
     if(!confirm(`Change ${name} to ${newStatus}?`)) return;
     try {
@@ -324,9 +455,6 @@ window.toggleFacilityStatus = async (name, newStatus) => {
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentUserToken}` },
             body: JSON.stringify({ facilityName: name, newStatus: newStatus })
         });
-        if (response.ok) { 
-            loadAdminControls(); 
-            fetchReservations(); 
-        }
+        if (response.ok) { loadAdminControls(); fetchReservations(); }
     } catch(e) { alert("Error connecting to server"); }
 };
