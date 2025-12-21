@@ -246,5 +246,7 @@ app.post('/reset-system', async (req, res) => {
     } catch (error) { res.status(500).send(error.message); }
 });
 
-const PORT = 8080;
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
