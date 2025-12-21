@@ -19,7 +19,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
-const API_URL = "http://localhost:8080";
+const API_URL = "";
 let currentUserToken = null; // Store token here
 
 // UI Elements
