@@ -4,6 +4,8 @@ const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth'); 
 const serviceAccount = require('./key.json');
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
 
 const PROJECT_ID = serviceAccount.project_id;
 
@@ -34,6 +36,29 @@ const authenticateUser = async (req, res, next) => {
     }
 };
 
+// Configure Email Transporter
+// ⚠️ IMPORTANT: Replace these with your actual email credentials or App Password
+const transporter = nodemailer.createTransport({
+    service: 'gmail', 
+    auth: {
+        user: 'your-email@gmail.com', 
+        pass: 'your-app-password'     
+    }
+});
+
+// Helper function to send email
+async function sendEmail(to, subject, text) {
+    try {
+        await transporter.sendMail({
+            from: '"UNITEN Facility" <your-email@gmail.com>',
+            to, subject, text
+        });
+        console.log(`📧 Email sent to ${to}`);
+    } catch (err) {
+        console.error("Email error:", err);
+    }
+}
+
 // --- ROUTES ---
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -48,14 +73,46 @@ app.get('/my-profile', authenticateUser, async (req, res) => {
 
 app.get('/facilities', authenticateUser, async (req, res) => {
     try {
+        const { search, status } = req.query; 
+
         const snapshot = await db.collection('facilities').get();
-        const facilities = [];
-        snapshot.forEach(doc => facilities.push(doc.data()));
+        let facilities = [];
+        // [CHANGE] We now include doc.id so we can delete it later
+        snapshot.forEach(doc => facilities.push({ id: doc.id, ...doc.data() }));
+
+        if (status && status !== '') {
+            facilities = facilities.filter(f => f.status === status);
+        }
+
+        if (search && search !== '') {
+            const lowerTerm = search.toLowerCase();
+            facilities = facilities.filter(f => 
+                f.name.toLowerCase().includes(lowerTerm) || 
+                f.type.toLowerCase().includes(lowerTerm)
+            );
+        }
+
         res.json(facilities);
     } catch(error) { res.status(500).send(error.message); }
 });
 
-// [NEW] CHECK REAL-TIME AVAILABILITY (Grays out dropdowns)
+app.delete('/admin/delete-facility/:id', authenticateUser, async (req, res) => {
+    try {
+        const facilityId = req.params.id;
+        const userDoc = await db.collection('users').doc(req.user.uid).get();
+        
+        // Check Admin
+        if (!userDoc.exists || userDoc.data().role !== 'admin') {
+            return res.status(403).json({ message: "Unauthorized" });
+        }
+
+        // Delete from Firestore
+        await db.collection('facilities').doc(facilityId).delete();
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ message: error.message }); }
+});
+
+// CHECK REAL-TIME AVAILABILITY
 app.get('/availability', authenticateUser, async (req, res) => {
     try {
         const { facility, date } = req.query;
@@ -76,15 +133,14 @@ app.get('/availability', authenticateUser, async (req, res) => {
         const bookings = [];
         bookingsSnap.forEach(doc => bookings.push(doc.data()));
 
-        // 3. Check Every Hour (08:00 - 22:00) to see if it's full
+        // 3. Check Every Hour (08:00 - 22:00)
         const fullSlots = [];
         for (let hour = 8; hour < 22; hour++) {
-            const timeString = hour.toString().padStart(2, '0') + ":00";      // e.g. "09:00"
-            const nextHourString = (hour + 1).toString().padStart(2, '0') + ":00"; // e.g. "10:00"
+            const timeString = hour.toString().padStart(2, '0') + ":00";      
+            const nextHourString = (hour + 1).toString().padStart(2, '0') + ":00"; 
 
             let count = 0;
             bookings.forEach(b => {
-                // Check Overlap: (NewStart < OldEnd) && (NewEnd > OldStart)
                 if (b.startTime < nextHourString && b.endTime > timeString) {
                     count++;
                 }
@@ -95,11 +151,11 @@ app.get('/availability', authenticateUser, async (req, res) => {
             }
         }
 
-        res.json(fullSlots); // Returns ["09:00", "14:00"] (List of Full hours)
+        res.json(fullSlots); 
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// CREATE RESERVATION (With Time Overlap Fix)
+// CREATE RESERVATION
 app.post('/reserve', authenticateUser, async (req, res) => {
   try {
     const { facility, date, startTime, endTime } = req.body;
@@ -123,14 +179,13 @@ app.post('/reserve', authenticateUser, async (req, res) => {
         const facilityDoc = facilityQuery.docs[0];
         const facData = facilityDoc.data();
 
-        // [FIX] Capacity Check - Count Overlaps ONLY
+        // Capacity Check
         const bookingsSnap = await t.get(db.collection('reservations')
             .where('facility', '==', facility).where('date', '==', date).where('status', 'in', ['pending', 'confirmed']));
 
         let overlapCount = 0;
         bookingsSnap.forEach(doc => {
             const b = doc.data();
-            // Check intersection of times
             if (startTime < b.endTime && endTime > b.startTime) overlapCount++;
         });
 
@@ -138,7 +193,7 @@ app.post('/reserve', authenticateUser, async (req, res) => {
             throw new Error(`❌ Slot Full! This time is fully booked.`);
         }
 
-        // Stats Update (Optional, just tracking usage count)
+        // Stats Update
         t.update(facilityDoc.ref, { currentOccupancy: facData.currentOccupancy + 1 });
 
         // Save
@@ -154,12 +209,22 @@ app.post('/reserve', authenticateUser, async (req, res) => {
         res.reservationId = newRef.id;
     });
 
-    res.status(200).json({ success: true, reservationId: res.reservationId });
-  } catch (error) { res.status(400).json({ message: error.message }); }
-});
+    // Send Confirmation Email
+    const userEmail = req.user.email; 
+    const emailBody = `
+        Hi,
+        Your reservation for ${facility} on ${date} (${startTime} - ${endTime}) has been received.
+        Status: PENDING APPROVAL.
+        
+        You will be notified once an admin reviews it.
+    `;
+    sendEmail(userEmail, 'Reservation Received - UNITEN', emailBody);
 
-// ... (Rest of your standard routes: reservations, approve, cancel, reset) ...
-// Copy the rest from the previous version or use the block below for completeness
+    // [FIXED] Send Response ONCE
+    res.status(200).json({ success: true, reservationId: res.reservationId });
+
+    } catch (error) { res.status(400).json({ message: error.message }); }
+});
 
 app.get('/reservations', authenticateUser, async (req, res) => {
     try {
@@ -191,6 +256,29 @@ app.post('/admin/update-facility', authenticateUser, async (req, res) => {
         const snapshot = await db.collection('facilities').where('name', '==', facilityName).limit(1).get();
         if (snapshot.empty) throw new Error("Facility not found");
         await snapshot.docs[0].ref.update({ status: newStatus });
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ message: error.message }); }
+});
+
+// [NEW] Add Facility Route
+app.post('/admin/add-facility', authenticateUser, async (req, res) => {
+    try {
+        const { name, type, maxCapacity } = req.body;
+        const userDoc = await db.collection('users').doc(req.user.uid).get();
+        
+        if (!userDoc.exists || userDoc.data().role !== 'admin') {
+            return res.status(403).json({ message: "Unauthorized" });
+        }
+
+        await db.collection('facilities').add({
+            name,
+            type,
+            label: name, 
+            maxCapacity: parseInt(maxCapacity),
+            currentOccupancy: 0,
+            status: 'Open'
+        });
+
         res.json({ success: true });
     } catch (error) { res.status(500).json({ message: error.message }); }
 });
@@ -244,6 +332,43 @@ app.post('/reset-system', async (req, res) => {
         await batch.commit();
         res.send("✅ Database Reset: System Ready!");
     } catch (error) { res.status(500).send(error.message); }
+});
+
+cron.schedule('0 8 * * *', async () => {
+    console.log("⏰ Running Daily Reminder Job...");
+    
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dateStr = tomorrow.toISOString().split('T')[0]; 
+
+    try {
+        const snapshot = await db.collection('reservations')
+            .where('date', '==', dateStr)
+            .where('status', '==', 'confirmed')
+            .get();
+
+        if (snapshot.empty) {
+            console.log("No reminders to send for tomorrow.");
+            return;
+        }
+
+        snapshot.forEach(async (doc) => {
+            const booking = doc.data();
+            let targetEmail = booking.studentId; 
+            
+            if (!targetEmail.includes('@')) {
+                 const userDoc = await db.collection('users').doc(booking.uid).get();
+                 if (userDoc.exists) targetEmail = userDoc.data().email; 
+            }
+
+            if (targetEmail && targetEmail.includes('@')) {
+                const msg = `Reminder: You have a booking tomorrow at ${booking.startTime} for ${booking.facility}.`;
+                sendEmail(targetEmail, 'Booking Reminder', msg);
+            }
+        });
+    } catch (error) {
+        console.error("Reminder Error:", error);
+    }
 });
 
 const PORT = process.env.PORT || 8080;
