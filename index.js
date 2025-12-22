@@ -41,8 +41,8 @@ const authenticateUser = async (req, res, next) => {
 const transporter = nodemailer.createTransport({
     service: 'gmail', 
     auth: {
-        user: 'your-email@gmail.com', 
-        pass: 'your-app-password'     
+        user: 'kuadamn@gmail.com', 
+        pass: 'hxsj qgmv twch efpx'     
     }
 });
 
@@ -239,13 +239,58 @@ app.get('/reservations', authenticateUser, async (req, res) => {
     } catch(error) { res.status(500).send(error.message); }
 });
 
+// [UPDATED] Approve & Send Email
 app.post('/admin/approve/:id', authenticateUser, async (req, res) => {
     try {
+        // 1. Check Admin Auth
         const userDoc = await db.collection('users').doc(req.user.uid).get();
-        if (!userDoc.exists || userDoc.data().role !== 'admin') return res.status(403).json({ message: "Unauthorized" });
-        await db.collection('reservations').doc(req.params.id).update({ status: 'confirmed' });
+        if (!userDoc.exists || userDoc.data().role !== 'admin') {
+            return res.status(403).json({ message: "Unauthorized" });
+        }
+
+        // 2. Fetch the Reservation Data (We need this to know who to email)
+        const reservationRef = db.collection('reservations').doc(req.params.id);
+        const reservationSnap = await reservationRef.get();
+        
+        if (!reservationSnap.exists) {
+            return res.status(404).json({ message: "Reservation not found" });
+        }
+        
+        const booking = reservationSnap.data();
+
+        // 3. Update Status to 'confirmed'
+        await reservationRef.update({ status: 'confirmed' });
+
+        // 4. Determine Student Email
+        // (Same logic as your reminders: use studentId if it's an email, otherwise fetch from Users collection)
+        let targetEmail = booking.studentId; 
+        
+        if (!targetEmail.includes('@')) {
+             const studentUserDoc = await db.collection('users').doc(booking.uid).get();
+             if (studentUserDoc.exists) targetEmail = studentUserDoc.data().email; 
+        }
+
+        // 5. Send The Email
+        if (targetEmail && targetEmail.includes('@')) {
+            const emailSubject = `✅ Reservation Approved - ${booking.facility}`;
+            const emailBody = `
+                Good news! Your reservation has been approved.
+                
+                Facility: ${booking.facility}
+                Date: ${booking.date}
+                Time: ${booking.startTime} - ${booking.endTime}
+                
+                Please ensure you follow all facility rules.
+            `;
+            sendEmail(targetEmail, emailSubject, emailBody);
+        }
+
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ message: error.message }); }
+
+    } catch (error) { 
+        console.error("Approval Error:", error);
+        res.status(500).json({ message: error.message }); 
+    }
 });
 
 app.post('/admin/update-facility', authenticateUser, async (req, res) => {
