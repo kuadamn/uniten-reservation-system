@@ -326,8 +326,9 @@ async function loadUserProfile() {
             // HIDE Admin Panel
             if(adminPanel) adminPanel.classList.add('hidden');
             
-            // SHOW Left Sidebar
-            if(leftColumn) leftColumn.classList.remove('hidden');
+            // SHOW Search, BUT HIDE FORM
+            if(searchSection) searchSection.classList.remove('hidden');
+            if(studentView) studentView.classList.add('hidden'); // <--- CHANGED TO ADD 'hidden'
 
             // RESET Right Column Width
             if(rightColumn) {
@@ -602,21 +603,31 @@ async function performSearch() {
             return;
         }
 
-        resultsList.innerHTML = filtered.map(fac => `
-            <div onclick="selectFacility('${fac.type}', '${fac.name}')" 
-                 class="p-3 border border-gray-100 rounded-lg hover:bg-blue-50 cursor-pointer transition flex justify-between items-center group">
+        resultsList.innerHTML = filtered.map(fac => {
+            const isClosed = fac.status !== 'Open';
+            
+            // If closed, disable the click action and show a different label
+            const actionAttr = isClosed ? '' : `onclick="selectFacility('${fac.type}', '${fac.name}')"`;
+            const cursorClass = isClosed ? 'cursor-not-allowed opacity-75 bg-gray-50' : 'cursor-pointer hover:bg-blue-50';
+            
+            // Dynamic Button: "Book" or "Closed"
+            const buttonHtml = isClosed 
+                ? `<span class="text-xs font-bold text-red-500 bg-red-100 px-3 py-1.5 rounded border border-red-200">CLOSED</span>`
+                : `<button class="text-xs bg-white border border-gray-200 px-3 py-1.5 rounded text-blue-600 font-medium group-hover:bg-blue-600 group-hover:text-white transition">Book</button>`;
+
+            return `
+            <div ${actionAttr} 
+                 class="p-3 border border-gray-100 rounded-lg ${cursorClass} transition flex justify-between items-center group">
                 <div>
                     <p class="font-bold text-gray-800 text-sm">${fac.name}</p>
                     <div class="flex items-center gap-2 mt-1">
                         <span class="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">${fac.type}</span>
-                        ${fac.status !== 'Open' ? '<span class="text-xs text-red-600 font-bold uppercase">Closed</span>' : ''}
+                        ${isClosed ? `<span class="text-xs text-red-600 font-bold uppercase">Maintenance</span>` : ''}
                     </div>
                 </div>
-                <button class="text-xs bg-white border border-gray-200 px-3 py-1.5 rounded text-blue-600 font-medium group-hover:bg-blue-600 group-hover:text-white transition">
-                    Book
-                </button>
+                ${buttonHtml}
             </div>
-        `).join('');
+        `}).join('');
 
     } catch (error) {
         console.error(error);
@@ -639,10 +650,14 @@ window.selectFacility = (type, specificName) => {
         }
         
         const formContainer = document.getElementById('studentView');
+        
+        // [NEW] REVEAL FORM
+        formContainer.classList.remove('hidden'); 
+
         formContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
         formContainer.classList.add('ring-2', 'ring-yellow-400');
         setTimeout(() => formContainer.classList.remove('ring-2', 'ring-yellow-400'), 1000);
-    }, 150); 
+    }, 150);
 };
 
 window.filterAdminReservations = async () => {

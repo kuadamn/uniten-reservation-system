@@ -156,72 +156,84 @@ app.get('/availability', authenticateUser, async (req, res) => {
 });
 
 // CREATE RESERVATION
+// CREATE RESERVATION
 app.post('/reserve', authenticateUser, async (req, res) => {
-  try {
-    const { facility, date, startTime, endTime } = req.body;
-    const uid = req.user.uid; 
+    try {
+        const { facility, date, startTime, endTime } = req.body;
+        const uid = req.user.uid; // <--- MISSING LINE ADDED HERE
 
-    if (!endTime) throw new Error("End Time is required.");
-    if (startTime >= endTime) throw new Error("Start time must be before End time.");
-
-    await db.runTransaction(async (t) => {
-        const userDoc = await t.get(db.collection('users').doc(uid));
-        const userData = userDoc.exists ? userDoc.data() : {};
-
-        // Duplicate Check
-        const duplicateQuery = await t.get(db.collection('reservations')
-            .where('uid', '==', uid).where('facility', '==', facility).where('date', '==', date).where('startTime', '==', startTime));
-        if (!duplicateQuery.empty) throw new Error("⚠️ You have already requested this slot!");
-
-        // Facility Info
-        const facilityQuery = await t.get(db.collection('facilities').where('name', '==', facility).limit(1));
-        if (facilityQuery.empty) throw new Error("Facility not found!");
-        const facilityDoc = facilityQuery.docs[0];
-        const facData = facilityDoc.data();
-
-        // Capacity Check
-        const bookingsSnap = await t.get(db.collection('reservations')
-            .where('facility', '==', facility).where('date', '==', date).where('status', 'in', ['pending', 'confirmed']));
-
-        let overlapCount = 0;
-        bookingsSnap.forEach(doc => {
-            const b = doc.data();
-            if (startTime < b.endTime && endTime > b.startTime) overlapCount++;
-        });
-
-        if (overlapCount >= facData.maxCapacity) {
-            throw new Error(`❌ Slot Full! This time is fully booked.`);
+        // 1. Maintenance Check (Correctly Implemented)
+        const facilitySnapshot = await db.collection('facilities').where('name', '==', facility).get();
+        if (!facilitySnapshot.empty) {
+            const facData = facilitySnapshot.docs[0].data();
+            if (facData.status !== 'Open') {
+                return res.status(400).json({ message: `⛔ ${facility} is currently closed for maintenance.` });
+            }
         }
 
-        // Stats Update
-        t.update(facilityDoc.ref, { currentOccupancy: facData.currentOccupancy + 1 });
+        if (!endTime) throw new Error("End Time is required.");
+        if (startTime >= endTime) throw new Error("Start time must be before End time.");
 
-        // Save
-        const newRef = db.collection('reservations').doc();
-        t.set(newRef, {
-            uid: uid,
-            studentName: userData.name || "Unknown",
-            studentId: userData.studentId || req.user.email,
-            facility, date, startTime, endTime,
-            status: 'pending', 
-            createdAt: new Date()
+        await db.runTransaction(async (t) => {
+            // Now 'uid' is defined and this line will work
+            const userDoc = await t.get(db.collection('users').doc(uid)); 
+            const userData = userDoc.exists ? userDoc.data() : {};
+
+            // ... (Rest of your transaction code is fine) ...
+            
+            // Duplicate Check
+            const duplicateQuery = await t.get(db.collection('reservations')
+                .where('uid', '==', uid).where('facility', '==', facility).where('date', '==', date).where('startTime', '==', startTime));
+            if (!duplicateQuery.empty) throw new Error("⚠️ You have already requested this slot!");
+
+            // Facility Info
+            const facilityQuery = await t.get(db.collection('facilities').where('name', '==', facility).limit(1));
+            if (facilityQuery.empty) throw new Error("Facility not found!");
+            const facilityDoc = facilityQuery.docs[0];
+            const facData = facilityDoc.data();
+
+            // Capacity Check
+            const bookingsSnap = await t.get(db.collection('reservations')
+                .where('facility', '==', facility).where('date', '==', date).where('status', 'in', ['pending', 'confirmed']));
+
+            let overlapCount = 0;
+            bookingsSnap.forEach(doc => {
+                const b = doc.data();
+                if (startTime < b.endTime && endTime > b.startTime) overlapCount++;
+            });
+
+            if (overlapCount >= facData.maxCapacity) {
+                throw new Error(`❌ Slot Full! This time is fully booked.`);
+            }
+
+            // Stats Update
+            t.update(facilityDoc.ref, { currentOccupancy: facData.currentOccupancy + 1 });
+
+            // Save
+            const newRef = db.collection('reservations').doc();
+            t.set(newRef, {
+                uid: uid,
+                studentName: userData.name || "Unknown",
+                studentId: userData.studentId || req.user.email,
+                facility, date, startTime, endTime,
+                status: 'pending', 
+                createdAt: new Date()
+            });
+            res.reservationId = newRef.id;
         });
-        res.reservationId = newRef.id;
-    });
 
-    // Send Confirmation Email
-    const userEmail = req.user.email; 
-    const emailBody = `
-        Hi,
-        Your reservation for ${facility} on ${date} (${startTime} - ${endTime}) has been received.
-        Status: PENDING APPROVAL.
-        
-        You will be notified once an admin reviews it.
-    `;
-    sendEmail(userEmail, 'Reservation Received - UNITEN', emailBody);
+        // Send Confirmation Email
+        const userEmail = req.user.email; 
+        const emailBody = `
+            Hi,
+            Your reservation for ${facility} on ${date} (${startTime} - ${endTime}) has been received.
+            Status: PENDING APPROVAL.
+            
+            You will be notified once an admin reviews it.
+        `;
+        sendEmail(userEmail, 'Reservation Received - UNITEN', emailBody);
 
-    // [FIXED] Send Response ONCE
-    res.status(200).json({ success: true, reservationId: res.reservationId });
+        res.status(200).json({ success: true, reservationId: res.reservationId });
 
     } catch (error) { res.status(400).json({ message: error.message }); }
 });
