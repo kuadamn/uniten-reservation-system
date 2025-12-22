@@ -104,16 +104,20 @@ async function loadFacilities() {
             let matching = allFacilitiesData.filter(f => f.type === selectedType);
             matching.sort((a, b) => a.label.localeCompare(b.label));
 
-            if (matching.length === 1) {
+
+            if (matching.length === 1 && matching[0].status === 'Open') {
                 unitSelect.innerHTML = `<option value="${matching[0].name}" selected>${matching[0].name}</option>`;
                 unitContainer.classList.add('hidden');
                 startAvailabilityPolling();
             } else {
+
                 unitContainer.classList.remove('hidden');
                 unitSelect.innerHTML = '<option value="">-- Select Specific Unit --</option>';
+                
                 matching.forEach(fac => {
                     const isClosed = fac.status !== 'Open';
-                    unitSelect.innerHTML += `<option value="${fac.name}" ${isClosed ? 'disabled' : ''}>
+
+                    unitSelect.innerHTML += `<option value="${fac.name}" ${isClosed ? 'disabled' : ''} class="${isClosed ? 'text-red-500 font-bold' : ''}">
                         ${fac.label} ${isClosed ? '(MAINTENANCE)' : ''}
                     </option>`;
                 });
